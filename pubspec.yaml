@@ -1,0 +1,12 @@
+name: carolina_codes_dart
+description: Carolina Code Conference polyglot API (Dart / shelf)
+version: 0.2.0
+publish_to: none
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  postgres: ^3.4.5
+  shelf: ^1.4.2
+  shelf_router: ^1.1.4
