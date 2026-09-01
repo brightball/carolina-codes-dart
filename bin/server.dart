@@ -38,7 +38,45 @@ const sponsorCols =
 const talkCols =
     'slug, title, description, format, youtube_id, year, speaker_slug, languages, topics';
 
-late final Pool pool;
+/// Bind address for shelf. IPv6 any-address (dual-stack where the OS allows).
+final Object listenAddress = InternetAddress.anyIPv6;
+
+class CatalogDb {
+  int sqlCount = 0;
+  int connectCount = 0;
+  Pool? _pool;
+  Future<void> Function(String dsn)? openHook;
+  Future<Result> Function(String sql, List<Object?> params)? executeHook;
+
+  Future<void> open(String dsn) async {
+    connectCount++;
+    if (openHook != null) {
+      await openHook!(dsn);
+      return;
+    }
+    _pool = Pool.withEndpoints(
+      [parseEndpoint(dsn)],
+      settings: PoolSettings(
+        maxConnectionCount: 8,
+        sslMode: sslModeFor(dsn),
+      ),
+    );
+  }
+
+  Future<Result> execute(String sql, [List<Object?> params = const []]) async {
+    sqlCount++;
+    if (executeHook != null) {
+      return executeHook!(sql, params);
+    }
+    final p = _pool;
+    if (p == null) {
+      throw StateError('database not opened');
+    }
+    return p.execute(sql, parameters: params);
+  }
+}
+
+late CatalogDb db;
 
 String env(String key, String fallback) {
   final v = Platform.environment[key];
@@ -94,14 +132,14 @@ Map<String, dynamic> clean(Map<String, dynamic> row) {
 Future<List<Map<String, dynamic>>> talksFor(String slug, [int? year]) async {
   final Result result;
   if (year == null) {
-    result = await pool.execute(
+    result = await db.execute(
       'SELECT $talkCols FROM v1_talks WHERE speaker_slug = \$1 ORDER BY year DESC',
-      parameters: [slug],
+      [slug],
     );
   } else {
-    result = await pool.execute(
+    result = await db.execute(
       'SELECT $talkCols FROM v1_talks WHERE speaker_slug = \$1 AND year = \$2 ORDER BY year DESC',
-      parameters: [slug, year],
+      [slug, year],
     );
   }
   return result.map((row) {
@@ -113,27 +151,88 @@ Future<List<Map<String, dynamic>>> talksFor(String slug, [int? year]) async {
 }
 
 Future<List<int>> talkYears(String slug) async {
-  final result = await pool.execute(
+  final result = await db.execute(
     'SELECT DISTINCT year FROM v1_talks WHERE speaker_slug = \$1 ORDER BY year DESC',
-    parameters: [slug],
+    [slug],
   );
   return result.map((r) => r[0] as int).toList();
 }
 
 Future<List<int>> sponsorYears(String slug) async {
-  final result = await pool.execute(
+  final result = await db.execute(
     'SELECT DISTINCT year FROM v1_sponsorships WHERE sponsor_slug = \$1 ORDER BY year DESC',
-    parameters: [slug],
+    [slug],
   );
   return result.map((r) => r[0] as int).toList();
 }
 
 Future<List<Map<String, dynamic>>> sponsorshipsFor(String slug) async {
-  final result = await pool.execute(
+  final result = await db.execute(
     'SELECT sponsor_slug, year, tier, blurb, featured FROM v1_sponsorships WHERE sponsor_slug = \$1 ORDER BY year DESC',
-    parameters: [slug],
+    [slug],
   );
   return result.map((r) => clean(r.toColumnMap())).toList();
+}
+
+String pgTextArray(Iterable<String> slugs) {
+  final inner = slugs.map((s) => '"$s"').join(',');
+  return '{$inner}';
+}
+
+Map<String, dynamic> talkMap(ResultRow row) {
+  final m = clean(row.toColumnMap());
+  m['languages'] = strList(m['languages']);
+  m['topics'] = strList(m['topics']);
+  return m;
+}
+
+Future<List<Map<String, dynamic>>> listSpeakersYear(int year) async {
+  final result = await db.execute(
+    'SELECT $speakerCols FROM v1_speakers '
+    'WHERE slug IN (SELECT speaker_slug FROM v1_talks WHERE year = \$1) '
+    'ORDER BY last_name, first_name',
+    [year],
+  );
+  final speakers = result.map((r) => speakerRow(r)).toList();
+  if (speakers.isEmpty) return speakers;
+
+  final talksResult = await db.execute(
+    'SELECT $talkCols FROM v1_talks WHERE year = \$1 ORDER BY speaker_slug, year DESC',
+    [year],
+  );
+  final talksBy = <String, List<Map<String, dynamic>>>{};
+  for (final row in talksResult) {
+    final talk = talkMap(row);
+    final slug = talk['speaker_slug'] as String? ?? '';
+    talksBy.putIfAbsent(slug, () => []).add(talk);
+  }
+
+  final slugs = speakers.map((s) => s['slug'] as String).toList();
+  final yearsResult = await db.execute(
+    'SELECT DISTINCT speaker_slug, year FROM v1_talks WHERE speaker_slug = ANY(\$1::text[]) '
+    'ORDER BY speaker_slug, year DESC',
+    [pgTextArray(slugs)],
+  );
+  final yearsBy = <String, List<int>>{};
+  for (final row in yearsResult) {
+    final m = row.toColumnMap();
+    final slug = m['speaker_slug'] as String? ?? '';
+    final y = m['year'] as int? ?? 0;
+    yearsBy.putIfAbsent(slug, () => []).add(y);
+  }
+
+  return speakers.map((sp) {
+    final slug = sp['slug'] as String;
+    final talks = talksBy[slug] ?? const <Map<String, dynamic>>[];
+    return {
+      ...sp,
+      'year': year,
+      'talks': talks,
+      'languages': uniq(talks.expand((t) => strList(t['languages']))),
+      'topics': uniq(talks.expand((t) => strList(t['topics']))),
+      'years': yearsBy[slug] ?? const <int>[],
+    };
+  }).toList();
 }
 
 Map<String, dynamic> speakerRow(ResultRow row) => clean(row.toColumnMap());
@@ -156,7 +255,7 @@ Handler makeHandler() {
   router.get('/health', (Request _) => jsonResponse({'ok': true}));
 
   router.get('/v1/years', (Request _) async {
-    final result = await pool.execute(
+    final result = await db.execute(
       'SELECT year, slug, name, status FROM v1_years ORDER BY year DESC',
     );
     return jsonResponse({
@@ -168,28 +267,10 @@ Handler makeHandler() {
     final yearRaw = req.url.queryParameters['year'];
     if (yearRaw != null && yearRaw.isNotEmpty) {
       final year = int.parse(yearRaw);
-      final result = await pool.execute(
-        'SELECT $speakerCols FROM v1_speakers '
-        'WHERE slug IN (SELECT speaker_slug FROM v1_talks WHERE year = \$1) '
-        'ORDER BY last_name, first_name',
-        parameters: [year],
-      );
-      final speakers = <Map<String, dynamic>>[];
-      for (final row in result) {
-        final sp = speakerRow(row);
-        final talks = await talksFor(sp['slug'] as String, year);
-        speakers.add({
-          ...sp,
-          'year': year,
-          'talks': talks,
-          'languages': uniq(talks.expand((t) => strList(t['languages']))),
-          'topics': uniq(talks.expand((t) => strList(t['topics']))),
-          'years': await talkYears(sp['slug'] as String),
-        });
-      }
+      final speakers = await listSpeakersYear(year);
       return jsonResponse({'data': speakers});
     }
-    final result = await pool.execute(
+    final result = await db.execute(
       'SELECT $speakerCols FROM v1_speakers ORDER BY last_name, first_name',
     );
     return jsonResponse({
@@ -202,9 +283,9 @@ Handler makeHandler() {
       return notFound();
     }
     final y = int.parse(year);
-    final result = await pool.execute(
+    final result = await db.execute(
       'SELECT $speakerCols FROM v1_speakers WHERE slug = \$1',
-      parameters: [slug],
+      [slug],
     );
     if (result.isEmpty) return notFound();
     final talks = await talksFor(slug, y);
@@ -221,9 +302,9 @@ Handler makeHandler() {
   });
 
   router.get('/v1/speakers/<slug>', (Request _, String slug) async {
-    final result = await pool.execute(
+    final result = await db.execute(
       'SELECT $speakerCols FROM v1_speakers WHERE slug = \$1',
-      parameters: [slug],
+      [slug],
     );
     if (result.isEmpty) return notFound();
     final speaker = speakerRow(result.first);
@@ -236,15 +317,15 @@ Handler makeHandler() {
     final yearRaw = req.url.queryParameters['year'];
     if (yearRaw != null && yearRaw.isNotEmpty) {
       final year = int.parse(yearRaw);
-      final result = await pool.execute(
+      final result = await db.execute(
         'SELECT $yearSponsorCols FROM v1_year_sponsors WHERE year = \$1 ORDER BY name',
-        parameters: [year],
+        [year],
       );
       return jsonResponse({
         'data': result.map((r) => clean(r.toColumnMap())).toList(),
       });
     }
-    final result = await pool.execute(
+    final result = await db.execute(
       'SELECT $sponsorCols FROM v1_sponsors ORDER BY name',
     );
     return jsonResponse({
@@ -255,9 +336,9 @@ Handler makeHandler() {
   router.get('/v1/sponsors/<year>/<slug>', (Request _, String year, String slug) async {
     if (int.tryParse(year) == null) return notFound();
     final y = int.parse(year);
-    final result = await pool.execute(
+    final result = await db.execute(
       'SELECT $yearSponsorCols FROM v1_year_sponsors WHERE year = \$1 AND slug = \$2',
-      parameters: [y, slug],
+      [y, slug],
     );
     if (result.isEmpty) return notFound();
     final sponsor = clean(result.first.toColumnMap());
@@ -268,9 +349,9 @@ Handler makeHandler() {
   });
 
   router.get('/v1/sponsors/<slug>', (Request _, String slug) async {
-    final result = await pool.execute(
+    final result = await db.execute(
       'SELECT $sponsorCols FROM v1_sponsors WHERE slug = \$1',
-      parameters: [slug],
+      [slug],
     );
     if (result.isEmpty) return notFound();
     final sponsor = clean(result.first.toColumnMap());
@@ -354,13 +435,8 @@ Future<void> main() async {
     'postgres://postgres:postgres@127.0.0.1:5432/carolina_dev',
   );
   final port = int.parse(env('PORT', '4012'));
-  pool = Pool.withEndpoints(
-    [parseEndpoint(dsn)],
-    settings: PoolSettings(
-      maxConnectionCount: 8,
-      sslMode: sslModeFor(dsn),
-    ),
-  );
+  db = CatalogDb();
+  await db.open(dsn);
 
   final handler = Pipeline()
       .addMiddleware((inner) {
@@ -374,7 +450,7 @@ Future<void> main() async {
       })
       .addHandler(makeHandler());
 
-  final server = await io.serve(handler, '0.0.0.0', port);
+  final server = await io.serve(handler, listenAddress, port);
   stderr.writeln('carolina-codes-dart listening on :${server.port}');
   register('$port');
 }
