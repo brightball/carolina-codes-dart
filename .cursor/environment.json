@@ -1,0 +1,14 @@
+{
+  "name": "carolina-codes-dart",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": "."
+  },
+  "install": "dart pub get",
+  "ports": [
+    {
+      "name": "api",
+      "port": 4012
+    }
+  ]
+}
