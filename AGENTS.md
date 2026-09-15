@@ -1,6 +1,6 @@
 # carolina-codes-dart
 
-Read-only v1 polyglot API. See README.md for install, run, and test commands.
+Read-only v1 polyglot API. See README.md for install, run, and test commands. `make check` (and `pre-commit run --all-files`) runs dart test, dart analyze, osv-scanner, gitleaks, and dart format. Gitea `.gitea/workflows/ci.yml` runs each as its own parallel job.
 
 ## Cursor Cloud specific instructions
 

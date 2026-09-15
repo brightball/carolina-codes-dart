@@ -18,10 +18,18 @@ const endpoints = [
   {'method': 'GET', 'path': '/', 'query': <String>[]},
   {'method': 'GET', 'path': '/health', 'query': <String>[]},
   {'method': 'GET', 'path': '/v1/years', 'query': <String>[]},
-  {'method': 'GET', 'path': '/v1/speakers', 'query': ['year']},
+  {
+    'method': 'GET',
+    'path': '/v1/speakers',
+    'query': ['year']
+  },
   {'method': 'GET', 'path': '/v1/speakers/:slug', 'query': <String>[]},
   {'method': 'GET', 'path': '/v1/speakers/:year/:slug', 'query': <String>[]},
-  {'method': 'GET', 'path': '/v1/sponsors', 'query': ['year']},
+  {
+    'method': 'GET',
+    'path': '/v1/sponsors',
+    'query': ['year']
+  },
   {'method': 'GET', 'path': '/v1/sponsors/:slug', 'query': <String>[]},
   {'method': 'GET', 'path': '/v1/sponsors/:year/:slug', 'query': <String>[]},
 ];
@@ -278,7 +286,8 @@ Handler makeHandler() {
     });
   });
 
-  router.get('/v1/speakers/<year>/<slug>', (Request _, String year, String slug) async {
+  router.get('/v1/speakers/<year>/<slug>',
+      (Request _, String year, String slug) async {
     if (int.tryParse(year) == null) {
       return notFound();
     }
@@ -333,7 +342,8 @@ Handler makeHandler() {
     });
   });
 
-  router.get('/v1/sponsors/<year>/<slug>', (Request _, String year, String slug) async {
+  router.get('/v1/sponsors/<year>/<slug>',
+      (Request _, String year, String slug) async {
     if (int.tryParse(year) == null) return notFound();
     final y = int.parse(year);
     final result = await db.execute(
@@ -372,11 +382,13 @@ Endpoint parseEndpoint(String dsn) {
   }
   final uri = Uri.parse(s);
   final userInfo = uri.userInfo.split(':');
-  final user = userInfo.isNotEmpty ? Uri.decodeComponent(userInfo.first) : 'postgres';
+  final user =
+      userInfo.isNotEmpty ? Uri.decodeComponent(userInfo.first) : 'postgres';
   final password = userInfo.length > 1
       ? Uri.decodeComponent(userInfo.sublist(1).join(':'))
       : '';
-  final database = uri.pathSegments.isNotEmpty ? uri.pathSegments.first : 'postgres';
+  final database =
+      uri.pathSegments.isNotEmpty ? uri.pathSegments.first : 'postgres';
   return Endpoint(
     host: uri.host.isEmpty ? '127.0.0.1' : uri.host,
     port: uri.hasPort ? uri.port : 5432,
@@ -413,7 +425,8 @@ Future<void> register(String port) async {
     'base_url': base,
     'endpoints': endpoints,
   });
-  final uri = Uri.parse('${url.replaceAll(RegExp(r'/$'), '')}/internal/api-endpoints/register');
+  final uri = Uri.parse(
+      '${url.replaceAll(RegExp(r'/$'), '')}/internal/api-endpoints/register');
   try {
     final client = HttpClient();
     client.connectionTimeout = const Duration(seconds: 5);
@@ -438,17 +451,15 @@ Future<void> main() async {
   db = CatalogDb();
   await db.open(dsn);
 
-  final handler = Pipeline()
-      .addMiddleware((inner) {
-        return (req) async {
-          final res = await inner(req);
-          return res.change(headers: {
-            'X-Polyglot-Language': language,
-            'X-Polyglot-Framework': framework,
-          });
-        };
-      })
-      .addHandler(makeHandler());
+  final handler = Pipeline().addMiddleware((inner) {
+    return (req) async {
+      final res = await inner(req);
+      return res.change(headers: {
+        'X-Polyglot-Language': language,
+        'X-Polyglot-Framework': framework,
+      });
+    };
+  }).addHandler(makeHandler());
 
   final server = await io.serve(handler, listenAddress, port);
   stderr.writeln('carolina-codes-dart listening on :${server.port}');

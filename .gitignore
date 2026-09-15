@@ -1,6 +1,5 @@
 .dart_tool/
 .build/
-pubspec.lock
 *.exe
 .env
 server

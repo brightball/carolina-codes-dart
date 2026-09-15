@@ -27,7 +27,8 @@ void main() {
   test('/health does not open Postgres or run SQL', () async {
     api.db = api.CatalogDb();
     final handler = api.makeHandler();
-    final res = await handler(Request('GET', Uri.parse('http://localhost/health')));
+    final res =
+        await handler(Request('GET', Uri.parse('http://localhost/health')));
     expect(res.statusCode, 200);
     final body = await res.readAsString();
     expect(body.contains('ok'), isTrue);
@@ -41,8 +42,10 @@ void main() {
     await api.db.open('postgres://unused');
     expect(api.db.connectCount, 1);
     final handler = api.makeHandler();
-    final a = await handler(Request('GET', Uri.parse('http://localhost/health')));
-    final b = await handler(Request('GET', Uri.parse('http://localhost/health')));
+    final a =
+        await handler(Request('GET', Uri.parse('http://localhost/health')));
+    final b =
+        await handler(Request('GET', Uri.parse('http://localhost/health')));
     expect(a.statusCode, 200);
     expect(b.statusCode, 200);
     expect(api.db.connectCount, 1);
@@ -53,7 +56,13 @@ void main() {
     api.db = api.CatalogDb();
     final dsn = Platform.environment['DATABASE_URL'] ??
         'postgres://postgres:postgres@127.0.0.1:5432/carolina_dev';
-    await api.db.open(dsn);
+    try {
+      await api.db.open(dsn);
+      await api.db.execute('SELECT 1 FROM v1_speakers LIMIT 1');
+    } catch (e) {
+      markTestSkipped('catalog views unavailable: $e');
+      return;
+    }
     final connectsAfterOpen = api.db.connectCount;
     api.db.sqlCount = 0;
 
@@ -65,7 +74,8 @@ void main() {
     final sql = api.db.sqlCount;
     final speakers = '"talks":'.allMatches(body).length;
     // ignore: avoid_print
-    print('year list status=${res.statusCode} sql=$sql speakers=$speakers connects=${api.db.connectCount}');
+    print(
+        'year list status=${res.statusCode} sql=$sql speakers=$speakers connects=${api.db.connectCount}');
 
     if (res.statusCode == 200) {
       expect(speakers, greaterThanOrEqualTo(3));

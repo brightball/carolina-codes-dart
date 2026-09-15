@@ -1,0 +1,7 @@
+title = "carolina-codes-dart"
+
+[allowlist]
+paths = [
+  '''(^|/)\.dart_tool/''',
+  '''(^|/)\.git/''',
+]
