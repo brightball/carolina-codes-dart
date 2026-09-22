@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -52,7 +53,7 @@ final Object listenAddress = InternetAddress.anyIPv6;
 class CatalogDb {
   int sqlCount = 0;
   int connectCount = 0;
-  Pool? _pool;
+  Pool<dynamic>? _pool;
   Future<void> Function(String dsn)? openHook;
   Future<Result> Function(String sql, List<Object?> params)? executeHook;
 
@@ -106,12 +107,16 @@ Response jsonResponse(Object body, {int status = 200}) {
 
 Response notFound() => jsonResponse({'error': 'not_found'}, status: 404);
 
-List<String> strList(dynamic v) {
-  if (v == null) return [];
-  if (v is List) {
-    return v.map((e) => e.toString()).where((s) => s.isNotEmpty).toList();
+List<String> strList(Object? value) {
+  if (value is! Iterable<Object?>) return [];
+  final out = <String>[];
+  for (final item in value) {
+    if (item == null) continue;
+    final text = item.toString();
+    if (text.isEmpty) continue;
+    out.add(text);
   }
-  return [];
+  return out;
 }
 
 List<String> uniq(Iterable<String> xs) {
@@ -442,6 +447,18 @@ Future<void> register(String port) async {
   }
 }
 
+Middleware polyglotHeaders() {
+  return (Handler inner) {
+    return (Request req) async {
+      final Response res = await inner(req);
+      return res.change(headers: {
+        'X-Polyglot-Language': language,
+        'X-Polyglot-Framework': framework,
+      });
+    };
+  };
+}
+
 Future<void> main() async {
   final dsn = env(
     'DATABASE_URL',
@@ -449,19 +466,25 @@ Future<void> main() async {
   );
   final port = int.parse(env('PORT', '4012'));
   db = CatalogDb();
-  await db.open(dsn);
+  await serveApi(dsn, port);
+}
 
-  final handler = Pipeline().addMiddleware((inner) {
-    return (req) async {
-      final res = await inner(req);
-      return res.change(headers: {
-        'X-Polyglot-Language': language,
-        'X-Polyglot-Framework': framework,
-      });
-    };
-  }).addHandler(makeHandler());
-
+/// Binds the port before opening Postgres so `/` and `/health` answer when
+/// the catalog database is unreachable (Fly cold start after a host move).
+Future<HttpServer> serveApi(String dsn, int port) async {
+  final handler =
+      Pipeline().addMiddleware(polyglotHeaders()).addHandler(makeHandler());
   final server = await io.serve(handler, listenAddress, port);
   stderr.writeln('carolina-codes-dart listening on :${server.port}');
-  register('$port');
+  unawaited(openCatalog(dsn));
+  unawaited(register('${server.port}'));
+  return server;
+}
+
+Future<void> openCatalog(String dsn) async {
+  try {
+    await db.open(dsn);
+  } catch (e) {
+    stderr.writeln('catalog open: $e');
+  }
 }

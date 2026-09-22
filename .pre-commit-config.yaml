@@ -1,4 +1,4 @@
-# Local pre-commit hooks. Emergency escape: SKIP=test,sast,vuln,secrets,fmt git commit
+# Local pre-commit hooks. Emergency escape: SKIP=test,sast,vuln,secrets,fmt,aot git commit
 # Install once: make hooks   (or: pre-commit install)
 repos:
   - repo: local
@@ -31,5 +31,11 @@ repos:
         name: dart format
         language: system
         entry: make fmt-check
+        pass_filenames: false
+        always_run: true
+      - id: aot
+        name: dart compile exe
+        language: system
+        entry: make aot
         pass_filenames: false
         always_run: true

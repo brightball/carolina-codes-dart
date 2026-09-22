@@ -1,0 +1,8 @@
+.git
+.dart_tool
+.build
+build
+test
+*.md
+.gitea
+.githooks

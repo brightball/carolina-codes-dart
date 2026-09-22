@@ -1,9 +1,12 @@
-# One Gitea Actions job per quality check. Not a single combined job.
+# Prepare the workspace and tools once, then run each quality check
+# as its own job. Not a single combined job.
 #
-# act_runner starts a new container per job. Gitea git HTTP returns 401
-# without the job token. Dart images have no Node, so do not use
-# actions/checkout — clone GITHUB_SHA over HTTPS with the token.
-# Do not git init or set init.defaultBranch here.
+# act_runner starts a new container per job, so prepare uploads a
+# tarball via the Gitea Actions artifact API (curl, no Node). Check
+# jobs restore that payload and run only their command.
+# Dart images have no Node; do not use actions/checkout or
+# actions/upload-artifact. Clone GITHUB_SHA over HTTPS with the job
+# token. Do not git init or set init.defaultBranch here.
 name: ci
 
 on:
@@ -17,15 +20,64 @@ concurrency:
 env:
   GITHUB_TOKEN: ${{ github.token }}
 
+# Node-free restore of the prepare tarball. Check jobs must not
+# re-run apt-get, git clone/fetch/checkout, dart pub get, or tool
+# downloads; YAML anchors that still execute that setup in every
+# check job are not a substitute for prepare-then-consume.
+x-ci-restore: &ci-restore |
+  set -eu
+  cd "${GITHUB_WORKSPACE:?}"
+  token="${ACTIONS_RUNTIME_TOKEN:-${GITHUB_TOKEN:-${GITEA_TOKEN:-}}}"
+  if [ -z "$token" ]; then echo "missing token for artifact download" >&2; exit 1; fi
+  runtime="${ACTIONS_RUNTIME_URL:-${GITHUB_SERVER_URL:?}/api/actions_pipeline/}"
+  case "$runtime" in
+    */) ;;
+    *) runtime="${runtime}/" ;;
+  esac
+  run_id="${GITHUB_RUN_ID:?}"
+  name="ci-env"
+  auth="Authorization: Bearer ${token}"
+  json_str() {
+    tr -d '\n' < "$1" | sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+  }
+  abs_url() {
+    u="$1"
+    case "$u" in
+      http://*|https://*) printf '%s\n' "$u" ;;
+      /*) printf '%s\n' "${GITHUB_SERVER_URL}${u}" ;;
+      *) printf '%s\n' "${runtime}${u}" ;;
+    esac
+  }
+  curl -fsSL -H "$auth" -o /tmp/artifact-list.json \
+    "${runtime}_apis/pipelines/workflows/${run_id}/artifacts?api-version=6.0-preview"
+  container_url=$(abs_url "$(json_str /tmp/artifact-list.json fileContainerResourceUrl)")
+  if [ -z "$container_url" ]; then echo "prepare artifact list missing fileContainerResourceUrl" >&2; cat /tmp/artifact-list.json >&2; exit 1; fi
+  curl -fsSL -H "$auth" -o /tmp/artifact-files.json \
+    "${container_url}?itemPath=${name}"
+  content_location=$(abs_url "$(json_str /tmp/artifact-files.json contentLocation)")
+  if [ -z "$content_location" ]; then echo "prepare artifact missing contentLocation" >&2; cat /tmp/artifact-files.json >&2; exit 1; fi
+  curl -fsSL -H "$auth" -o /tmp/ci-env.tar.gz \
+    "${content_location}?itemPath=${name}%2Fci-env.tar.gz"
+  mkdir -p /tmp/payload /opt/ci
+  tar -xzf /tmp/ci-env.tar.gz -C /tmp/payload
+  test -d /tmp/payload/work
+  test -d /tmp/payload/opt-ci
+  cp -a /tmp/payload/work/. "${GITHUB_WORKSPACE}/"
+  cp -a /tmp/payload/opt-ci/. /opt/ci/
+  test -x /opt/ci/bin/osv-scanner
+  test -x /opt/ci/bin/gitleaks
+  test -d /opt/ci/pub-cache
+  echo "/opt/ci/bin" >> "${GITHUB_PATH:?}"
+  echo "PUB_CACHE=/opt/ci/pub-cache" >> "${GITHUB_ENV:?}"
+
 jobs:
-  test:
+  prepare:
     runs-on: ubuntu-latest
     container:
       image: docker.io/library/dart:3.9.4
       env:
         GITHUB_TOKEN: ${{ github.token }}
     steps:
-      - run: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates
       - run: |
           token="${GITHUB_TOKEN:-${GITEA_TOKEN:-}}"
           if [ -z "$token" ]; then echo "missing job token for git fetch" >&2; exit 1; fi
@@ -34,84 +86,134 @@ jobs:
           git clone --depth 1 --no-checkout "https://x-access-token:${token}@${host}/${GITHUB_REPOSITORY}" .
           git fetch --depth 1 origin "${GITHUB_SHA}"
           git checkout --force FETCH_HEAD
-      - run: dart pub get
+      - run: |
+          set -eu
+          cd "${GITHUB_WORKSPACE:?}"
+          mkdir -p /opt/ci/bin /opt/ci/pub-cache
+          export PUB_CACHE=/opt/ci/pub-cache
+          dart pub get
+          curl -fsSL -o /opt/ci/bin/osv-scanner https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64
+          chmod +x /opt/ci/bin/osv-scanner
+          curl -fsSL -o /tmp/gitleaks.tgz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          tar -xzf /tmp/gitleaks.tgz -C /opt/ci/bin gitleaks
+          chmod +x /opt/ci/bin/gitleaks
+      - run: |
+          set -eu
+          cd "${GITHUB_WORKSPACE:?}"
+          token="${ACTIONS_RUNTIME_TOKEN:-${GITHUB_TOKEN:-${GITEA_TOKEN:-}}}"
+          if [ -z "$token" ]; then echo "missing token for artifact upload" >&2; exit 1; fi
+          runtime="${ACTIONS_RUNTIME_URL:-${GITHUB_SERVER_URL:?}/api/actions_pipeline/}"
+          case "$runtime" in
+            */) ;;
+            *) runtime="${runtime}/" ;;
+          esac
+          run_id="${GITHUB_RUN_ID:?}"
+          name="ci-env"
+          auth="Authorization: Bearer ${token}"
+          mkdir -p /tmp/payload/work /tmp/payload/opt-ci
+          tar -C "${GITHUB_WORKSPACE}" --exclude=.git -cf - . | tar -C /tmp/payload/work -xf -
+          tar -C /opt/ci -cf - . | tar -C /tmp/payload/opt-ci -xf -
+          tar -C /tmp/payload -czf /tmp/ci-env.tar.gz .
+          ls -lh /tmp/ci-env.tar.gz
+          content_length=$(wc -c < /tmp/ci-env.tar.gz | tr -d ' ')
+          md5_hex=$(md5sum /tmp/ci-env.tar.gz | awk '{print $1}')
+          md5_b64=$(
+            i=0
+            while [ "$i" -lt "${#md5_hex}" ]; do
+              printf "\\x${md5_hex:i:2}"
+              i=$((i + 2))
+            done | base64 -w0
+          )
+          json_str() {
+            tr -d '\n' < "$1" | sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
+          }
+          abs_url() {
+            u="$1"
+            case "$u" in
+              http://*|https://*) printf '%s\n' "$u" ;;
+              /*) printf '%s\n' "${GITHUB_SERVER_URL}${u}" ;;
+              *) printf '%s\n' "${runtime}${u}" ;;
+            esac
+          }
+          curl -fsSL -H "$auth" -H 'Content-Type: application/json' \
+            -o /tmp/artifact-upload.json \
+            -X POST --data '{"Type":"actions_storage","Name":"ci-env"}' \
+            "${runtime}_apis/pipelines/workflows/${run_id}/artifacts?api-version=6.0-preview"
+          upload_url=$(abs_url "$(json_str /tmp/artifact-upload.json fileContainerResourceUrl)")
+          if [ -z "$upload_url" ]; then echo "artifact upload URL missing" >&2; cat /tmp/artifact-upload.json >&2; exit 1; fi
+          curl -fS -H "$auth" \
+            -H "x-actions-results-md5: ${md5_b64}" \
+            -H "x-tfs-filelength: ${content_length}" \
+            -H "content-range: bytes 0-$((content_length-1))/${content_length}" \
+            -X PUT --data-binary @/tmp/ci-env.tar.gz \
+            -o /tmp/artifact-put.json \
+            "${upload_url}?itemPath=${name}%2Fci-env.tar.gz"
+          curl -fsSL -H "$auth" -X PATCH \
+            -o /tmp/artifact-patch.json \
+            "${runtime}_apis/pipelines/workflows/${run_id}/artifacts?api-version=6.0-preview&artifactName=${name}"
+
+  test:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/library/dart:3.9.4
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - run: *ci-restore
       - run: dart test
 
   sast:
+    needs: prepare
     runs-on: ubuntu-latest
     container:
       image: docker.io/library/dart:3.9.4
       env:
         GITHUB_TOKEN: ${{ github.token }}
     steps:
-      - run: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates
-      - run: |
-          token="${GITHUB_TOKEN:-${GITEA_TOKEN:-}}"
-          if [ -z "$token" ]; then echo "missing job token for git fetch" >&2; exit 1; fi
-          host="${GITHUB_SERVER_URL#https://}"
-          host="${host#http://}"
-          git clone --depth 1 --no-checkout "https://x-access-token:${token}@${host}/${GITHUB_REPOSITORY}" .
-          git fetch --depth 1 origin "${GITHUB_SHA}"
-          git checkout --force FETCH_HEAD
-      - run: dart pub get
+      - run: *ci-restore
       - run: dart analyze --fatal-infos
 
   vuln:
-    runs-on: ubuntu-latest
-    container:
-      image: docker.io/library/ubuntu:24.04
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
-    steps:
-      - run: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates curl
-      - run: |
-          token="${GITHUB_TOKEN:-${GITEA_TOKEN:-}}"
-          if [ -z "$token" ]; then echo "missing job token for git fetch" >&2; exit 1; fi
-          host="${GITHUB_SERVER_URL#https://}"
-          host="${host#http://}"
-          git clone --depth 1 --no-checkout "https://x-access-token:${token}@${host}/${GITHUB_REPOSITORY}" .
-          git fetch --depth 1 origin "${GITHUB_SHA}"
-          git checkout --force FETCH_HEAD
-      - run: |
-          curl -fsSL -o /usr/local/bin/osv-scanner https://github.com/google/osv-scanner/releases/download/v2.6.0/osv-scanner_linux_amd64
-          chmod +x /usr/local/bin/osv-scanner
-      - run: osv-scanner scan source --lockfile=pubspec.lock
-
-  secrets:
-    runs-on: ubuntu-latest
-    container:
-      image: docker.io/library/ubuntu:24.04
-      env:
-        GITHUB_TOKEN: ${{ github.token }}
-    steps:
-      - run: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates curl tar
-      - run: |
-          token="${GITHUB_TOKEN:-${GITEA_TOKEN:-}}"
-          if [ -z "$token" ]; then echo "missing job token for git fetch" >&2; exit 1; fi
-          host="${GITHUB_SERVER_URL#https://}"
-          host="${host#http://}"
-          git clone --depth 1 --no-checkout "https://x-access-token:${token}@${host}/${GITHUB_REPOSITORY}" .
-          git fetch --depth 1 origin "${GITHUB_SHA}"
-          git checkout --force FETCH_HEAD
-      - run: |
-          curl -fsSL -o /tmp/gitleaks.tgz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
-          tar -xzf /tmp/gitleaks.tgz -C /usr/local/bin gitleaks
-      - run: gitleaks detect --source . --verbose --no-git
-
-  fmt:
+    needs: prepare
     runs-on: ubuntu-latest
     container:
       image: docker.io/library/dart:3.9.4
       env:
         GITHUB_TOKEN: ${{ github.token }}
     steps:
-      - run: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates
-      - run: |
-          token="${GITHUB_TOKEN:-${GITEA_TOKEN:-}}"
-          if [ -z "$token" ]; then echo "missing job token for git fetch" >&2; exit 1; fi
-          host="${GITHUB_SERVER_URL#https://}"
-          host="${host#http://}"
-          git clone --depth 1 --no-checkout "https://x-access-token:${token}@${host}/${GITHUB_REPOSITORY}" .
-          git fetch --depth 1 origin "${GITHUB_SHA}"
-          git checkout --force FETCH_HEAD
+      - run: *ci-restore
+      - run: osv-scanner scan source --lockfile=pubspec.lock
+
+  secrets:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/library/dart:3.9.4
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - run: *ci-restore
+      - run: gitleaks detect --source . --verbose --no-git
+
+  fmt:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/library/dart:3.9.4
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - run: *ci-restore
       - run: dart format --output=none --set-exit-if-changed .
+
+  aot:
+    needs: prepare
+    runs-on: ubuntu-latest
+    container:
+      image: docker.io/library/dart:3.9.4
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - run: *ci-restore
+      - run: mkdir -p build && dart compile exe bin/server.dart -o build/server

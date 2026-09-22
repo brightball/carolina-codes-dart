@@ -16,3 +16,4 @@ make sast
 make vuln
 make secrets
 make fmt-check
+make aot

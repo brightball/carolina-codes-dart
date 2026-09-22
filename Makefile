@@ -2,7 +2,7 @@
 # mise.toml pins dart, gitleaks, and osv-scanner.
 export PATH := $(HOME)/.local/bin:$(HOME)/.local/share/mise/shims:$(PATH)
 
-.PHONY: deps test sast vuln secrets fmt fmt-check check hooks
+.PHONY: deps test sast vuln secrets fmt fmt-check aot check hooks
 
 deps:
 	dart pub get
@@ -25,7 +25,11 @@ fmt:
 fmt-check:
 	dart format --output=none --set-exit-if-changed .
 
-check: test sast vuln secrets fmt-check
+aot: deps
+	mkdir -p build
+	dart compile exe bin/server.dart -o build/server
+
+check: test sast vuln secrets fmt-check aot
 
 hooks:
 	pre-commit install

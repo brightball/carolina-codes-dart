@@ -4,4 +4,5 @@ title = "carolina-codes-dart"
 paths = [
   '''(^|/)\.dart_tool/''',
   '''(^|/)\.git/''',
+  '''(^|/)build/''',
 ]

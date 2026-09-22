@@ -1,5 +1,6 @@
 .dart_tool/
 .build/
+build/
 *.exe
 .env
 server
