@@ -116,14 +116,8 @@ jobs:
           tar -C /tmp/payload -czf /tmp/ci-env.tar.gz .
           ls -lh /tmp/ci-env.tar.gz
           content_length=$(wc -c < /tmp/ci-env.tar.gz | tr -d ' ')
-          md5_hex=$(md5sum /tmp/ci-env.tar.gz | awk '{print $1}')
-          md5_b64=$(
-            i=0
-            while [ "$i" -lt "${#md5_hex}" ]; do
-              printf "\\x${md5_hex:i:2}"
-              i=$((i + 2))
-            done | base64 -w0
-          )
+          # act_runner runs this file with /bin/sh (dash), so no bash substrings.
+          md5_b64=$(openssl dgst -md5 -binary /tmp/ci-env.tar.gz | base64 -w0)
           json_str() {
             tr -d '\n' < "$1" | sed -n 's/.*"'"$2"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n 1
           }
@@ -147,7 +141,11 @@ jobs:
             -H "content-range: bytes 0-$((content_length-1))/${content_length}" \
             -X PUT --data-binary @/tmp/ci-env.tar.gz \
             -o /tmp/artifact-put.json \
-            "${upload_url}?itemPath=${name}%2Fci-env.tar.gz"
+            "${upload_url}?itemPath=${name}%2Fci-env.tar.gz" || {
+              echo "artifact put failed" >&2
+              cat /tmp/artifact-put.json >&2 || true
+              exit 1
+            }
           curl -fsSL -H "$auth" -X PATCH \
             -o /tmp/artifact-patch.json \
             "${runtime}_apis/pipelines/workflows/${run_id}/artifacts?api-version=6.0-preview&artifactName=${name}"
