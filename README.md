@@ -4,6 +4,15 @@ Read-only v1 polyglot API for Carolina Code Conference. Dart + shelf + postgres.
 
 Queries PostgreSQL `v1_*` views. Registers with Elixir once on boot.
 
+## Versions and notable packages
+
+- **Dart 3.9.4**, pinned in `mise.toml` (`dart = "3.9.4"`) and the `Dockerfile` (`FROM dart:3.9.4`). The Gitea prepare job uses the same `dart:3.9.4` image.
+- **shelf 1.4.2**, from `pubspec.yaml` (`shelf: ^1.4.2`) and `pubspec.lock` (shelf 1.4.2).
+- **shelf_router 1.1.4** for the route table.
+- **postgres 3.5.12** (`package:postgres`) for the `v1_*` view queries.
+- Production image: AOT `dart compile exe` on that SDK, then a scratch image that copies the SDK `/runtime` directory. The final stage does not install a distro with apt.
+- Gate tooling pinned in `mise.toml`: osv-scanner 2.6.0 and gitleaks 8.30.1.
+
 ```bash
 dart pub get
 DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/carolina_dev \
